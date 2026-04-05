@@ -1,0 +1,140 @@
+import baostock as bs
+import pandas as pd
+import matplotlib.pyplot as plt
+
+# 登录
+lg = bs.login()
+
+# 获取数据
+rs = bs.query_history_k_data_plus("sz.002255",
+    "date,open,high,low,close,volume",
+    start_date='2025-01-01', 
+    end_date='2026-03-28',
+    frequency="d",
+    adjustflag="3")
+
+# 转成DataFrame
+data_list = []
+while (rs.error_code == '0') & rs.next():
+    data_list.append(rs.get_row_data())
+df = pd.DataFrame(data_list, columns=rs.fields)
+bs.logout()
+
+# 数据清洗
+df['date'] = pd.to_datetime(df['date'])
+df = df.sort_values('date').reset_index(drop=True)
+df['close'] = df['close'].astype(float)
+
+# 计算均线
+df['ma5'] = df['close'].rolling(5).mean()
+df['ma10'] = df['close'].rolling(10).mean()
+df['ma60'] = df['close'].rolling(60).mean()
+df = df.dropna().reset_index(drop=True)
+
+# 生成信号
+df['signal'] = 0
+df.loc[df['ma5'] > df['ma10'], 'signal'] = 1
+df.loc[df['ma5'] < df['ma10'], 'signal'] = -1
+df['signal_change'] = df['signal'].diff()
+
+# 趋势过滤
+df['uptrend'] = df['close'] > df['ma60']
+
+print(f"数据：{df['date'].min()} 到 {df['date'].max()}，共{len(df)}天")
+
+# 策略参数
+trades = []
+holding = False
+entry_price = 0
+entry_date = None
+take_profit = 0.20
+stop_loss = 0.08
+
+# 模拟交易
+for i in range(len(df)):
+    current_date = df.iloc[i]['date']
+    current_price = df.iloc[i]['close']
+    signal_change = df.iloc[i]['signal_change']
+    uptrend = df.iloc[i]['uptrend']
+    
+    if holding:
+        # 止盈
+        if current_price >= entry_price * (1 + take_profit):
+            trades.append([entry_date, entry_price, current_date, current_price, '止盈'])
+            holding = False
+            continue
+        # 止损
+        if current_price <= entry_price * (1 - stop_loss):
+            trades.append([entry_date, entry_price, current_date, current_price, '止损'])
+            holding = False
+            continue
+    
+    # 买入条件：金叉 + 上升趋势
+    if not holding and signal_change == 2 and uptrend:
+        holding = True
+        entry_price = current_price
+        entry_date = current_date
+    
+    # 卖出条件：死叉
+    if holding and signal_change == -2:
+        trades.append([entry_date, entry_price, current_date, current_price, '均线死叉'])
+        holding = False
+
+# 期末平仓
+if holding:
+    trades.append([entry_date, entry_price, df.iloc[-1]['date'], df.iloc[-1]['close'], '期末平仓'])
+
+# 计算结果
+print("\n===== 交易明细 =====")
+total_return = 1
+win = lose = tp = sl = 0
+
+for i, t in enumerate(trades, 1):
+    buy_date, buy_price, sell_date, sell_price, reason = t
+    profit = (sell_price - buy_price) / buy_price
+    total_return *= (1 + profit)
+    
+    if profit > 0:
+        win += 1
+    else:
+        lose += 1
+    if reason == '止盈':
+        tp += 1
+    elif reason == '止损':
+        sl += 1
+    
+    emoji = "✅" if profit > 0 else "❌"
+    print(f"{i}. {buy_date.strftime('%Y-%m-%d')} 买 {buy_price:.2f} → {sell_date.strftime('%Y-%m-%d')} 卖 {sell_price:.2f} {emoji}")
+    print(f"   盈亏：{profit:.2%} ({reason})")
+
+print(f"\n===== 统计 =====")
+print(f"交易次数：{len(trades)}")
+print(f"盈利：{win}，亏损：{lose}")
+print(f"止盈：{tp}，止损：{sl}")
+if len(trades) > 0:
+    print(f"胜率：{win/len(trades)*100:.1f}%")
+print(f"总收益：{(total_return - 1):.2%}")
+
+# 画图
+plt.figure(figsize=(12,6))
+plt.plot(df['date'], df['close'], label='收盘价', linewidth=1)
+plt.plot(df['date'], df['ma5'], label='5日均线', alpha=0.8)
+plt.plot(df['date'], df['ma10'], label='10日均线', alpha=0.8)
+plt.plot(df['date'], df['ma60'], label='60日均线', alpha=0.8, linestyle='--')
+
+# 标记买卖点
+for t in trades:
+    buy_date, buy_price, sell_date, sell_price, reason = t
+    plt.scatter(buy_date, buy_price, color='red', marker='^', s=80)
+    if reason == '止盈':
+        plt.scatter(sell_date, sell_price, color='green', marker='v', s=80)
+    elif reason == '止损':
+        plt.scatter(sell_date, sell_price, color='orange', marker='v', s=80)
+    else:
+        plt.scatter(sell_date, sell_price, color='blue', marker='v', s=80)
+
+plt.xticks(df['date'][::80], rotation=45)
+plt.legend(['收盘价', '5日均线', '10日均线', '60日均线', '买入', '止盈', '止损', '死叉'])
+plt.title('股票 - 双均线 + 止盈止损 + 60日线过滤')
+plt.tight_layout()
+plt.show()
